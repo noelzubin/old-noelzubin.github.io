@@ -1,0 +1,275 @@
+---
+slug: "/blog/rust-magic"
+title: Rust PolymorphMagic
+date: "2021-05-04"
+tags: rust
+id: 2
+---
+
+Rust is an eloquent programming language. A language that boast of performance, type safety and its fine zero cost abstractions. Every Rust developer who has experimented with the high performance actix-web library, is bound to be bewildered by how flexible its API is. Here is a little taste of what the api looks like.
+
+```rust
+// this function takes 1 param.
+async fn one_param(path: Path<NameStruct>) -> String {
+    format!("Hello {}!", path.name)
+}
+
+// this function takes 2 param.
+async fn two_params(data: web::Data<AppState>, body: web::Json<Info>) -> impl Responder {
+    let count = data.count.get();
+    format!("count: {}, username: {}, ", data.count.get(), body.username)
+}
+
+
+App::new()
+    .route("/no-param", web::get().to(|| async { "Hello there!" }))
+    .route("/one-param/{name}", web::get().to(one_param))
+    .route("/two/", web::get().to(web::post().to(two_param)))
+```
+
+The `to` function takes as input a function that can not only take any number of arguments, but it also injects into the arguments - the right values based on its type upon invocation. For a language that lacks polymorphism, or functions with variable arity, this seems like an impossible pattern. In this post, I’ll attempt to decipher and recreate this fascinating pattern.
+
+I’ll create a Bakery library. A bakery has a supermarket assigned to it, and it takes in orders to create delicious goods out of the things it bought from the supermarket. The final API would look something like this.
+
+```rust
+    let mut bakery = Bakery::new();
+
+    bakery.order(|_: Banana| Banana); // 1 arg
+    bakery.order(|_: Chocolate, _: Milk| Cookie); // 2 args
+
+    bakery.process()
+```
+
+Before we start with the implementation, let’s get some basic things out of the way. In Actix-web the arguments of the handler function have to implement `fromRequest` and the response have to implment `HttpResponse`. In my case I came up with `Buyable` and `Eatable`. `Buyable`s are things you buy from a supermarket and `Eatable`s are things that are produced in the bakery.
+
+```rust
+struct Chocolate; // Buyable
+struct Milk; // Buyable
+struct Banana; // Buyable + Eatable (uhhh they're reselling bananas ?)
+struct Cookie; // Eatable
+
+trait Buyable { // can be bought from the supermarket
+    fn buy(store: Supermarket) -> Self;
+}
+
+trait Eatable: std::fmt::Debug { // made in the bakery
+    fn eat(&mut self) {
+        println!("eating");
+    }
+}
+
+impl Buyable for Chocolate {
+    fn buy(_store: Supermarket) -> Chocolate {
+        Chocolate
+    }
+}
+
+impl Buyable for Milk {
+    fn buy(_store: Supermarket) -> Milk {
+        Milk
+    }
+}
+
+impl Buyable for Banana {
+    fn buy(_store: Supermarket) -> Banana {
+        Banana
+    }
+}
+
+impl Eatable for Cookie {}
+impl Eatable for Banana {}
+```
+
+lets start with our Bakery implementation then. It has a supermarket assigned to it and also a vec of our handlers. But how do we tell Rust that ?. Our handlers are distinct functions with different signatures.
+
+```rust
+struct Supermarket {} // we can buy stuff from here.
+
+struct Bakery {
+    store: Supermarket,
+    orders: Vec< ??? OUR HANDLERS ??? >>,
+}
+```
+
+We clearly need to `trait` these handlers into one. Furthermore, what would the input for our order function be ?
+
+```rust
+impl Bakery {
+    fn order(&mut self, f: ?? WHAT GOES HERE ?? ) {
+        ...
+    }
+}
+```
+
+Hmm, OK let’s see if I can characterize all the functions with a trait.
+
+```rust
+trait Handler<Args, E> {
+    fn call(&self, args: ...Args) -> E
+}
+```
+
+Cool, except rust doesn’t support `...Args`. I have to specify the exact number of function arguments.
+
+After hours of racking my brain, and a bit of peeking into the actix-web source code. I figured it out. The trait handler has just 1 function that calls itself and it takes just 1 argument ‘Args’ - which is a tuple that holds the type of each argument in the function.
+
+```rust
+trait Handler<Args, E> {
+    fn call(&self, args: Args) -> E;
+}
+```
+
+To make this work we need to implement this for function of all arities. eg: The implementation can take the tuple handed to it and pass them as individual arguments.
+
+```rust
+/// Supermarket sells stuff to bake with.
+#[derive(Clone, Copy)]
+struct Supermarket {}
+
+#[derive(Debug)]
+struct Chocolate;
+
+#[derive(Debug)]
+struct Milk;
+
+#[derive(Debug)]
+struct Banana;
+
+#[derive(Debug)]
+struct Cookie;
+
+// Buyable things can be bought from the supermarket
+trait Buyable {
+    fn buy(store: Supermarket) -> Self;
+}
+
+// Eatable things are made in the bakery
+trait Eatable: std::fmt::Debug {
+    fn eat(&mut self) {
+        println!("eating");
+    }
+}
+
+impl Buyable for Chocolate {
+    fn buy(_store: Supermarket) -> Chocolate {
+        Chocolate
+    }
+}
+
+impl Buyable for Milk {
+    fn buy(_store: Supermarket) -> Milk {
+        Milk
+    }
+}
+
+impl Buyable for Banana {
+    fn buy(_store: Supermarket) -> Banana {
+        Banana
+    }
+}
+
+impl Eatable for Cookie {}
+impl Eatable for Banana {}
+
+/// MAIN APP STUFF
+/// Bakery buys stuff from the supermarket and makes Eatables
+struct Bakery {
+    store: Supermarket,
+    orders: Vec<Box<dyn FnOnce() -> Box<dyn Eatable>>>, // stores the wrapped handlers.
+}
+
+impl Bakery {
+    fn new() -> Self {
+        // create a empty
+        Bakery {
+            store: Supermarket {},
+            orders: Vec::new(),
+        }
+    }
+
+    fn order<F, Args, E>(&mut self, f: F)
+    where
+        F: Handler<Args, E> + 'static,
+        Args: Buyable,
+        E: Eatable + 'static,
+    {
+        let store = self.store;
+        let f = move || {
+            // The main magic happens here. Rust compiler ensures that
+            // the tuple is generated with the right arguments to be passsed to the handler.
+            let args = Buyable::buy(store);
+            let eatable: Box<dyn Eatable> = Box::new(f.call(args));
+            eatable
+        };
+        self.orders.push(Box::new(f));
+    }
+
+    // process just calls the vector of wrapped orders.
+    fn process(self) {
+        dbg!(self.orders.into_iter().map(|f| { f() }).collect::<Vec<_>>());
+    }
+}
+
+// Handler Args type for 1 argument
+impl<Arg1> Buyable for (Arg1,)
+where
+    Arg1: Buyable,
+{
+    fn buy(store: Supermarket) -> (Arg1,) {
+        (Buyable::buy(store),)
+    }
+}
+
+// Handler Args type for 1 arguments
+impl<Arg1, Arg2> Buyable for (Arg1, Arg2)
+where
+    Arg1: Buyable,
+    Arg2: Buyable,
+{
+    fn buy(store: Supermarket) -> (Arg1, Arg2) {
+        (Buyable::buy(store), Buyable::buy(store))
+    }
+}
+
+trait Handler<Args, E> {
+    fn call(&self, args: Args) -> E;
+}
+
+// For single argument
+impl<F, Arg1, E> Handler<(Arg1,), E> for F
+where
+    F: Fn(Arg1) -> E,
+    Arg1: Buyable,
+    E: Eatable,
+{
+    fn call(&self, (arg1,): (Arg1,)) -> E {
+        self(arg1)
+    }
+}
+
+// For 2 arguments
+impl<F, Arg1, Arg2, E> Handler<(Arg1, Arg2), E> for F
+where
+    F: Fn(Arg1, Arg2) -> E,
+    Arg1: Buyable,
+    Arg2: Buyable,
+    E: Eatable,
+{
+    fn call(&self, (arg1, arg2): (Arg1, Arg2)) -> E {
+        self(arg1, arg2)
+    }
+}
+fn main() {
+    let mut bakery = Bakery::new();
+
+    bakery.order(|_: Chocolate, _: Milk| Cookie);
+
+    bakery.order(|_: Banana| Banana);
+
+    bakery.process()
+}
+```
+
+Right now, this code only supports functions with a max arity of 2. But you can easily allow functions with more arity by implementing the corresponding `Handler` and `Buyable` traits. In the actix-web library, it supports up to 12 arities, and it makes use of declarative macros in rust to implement the trait for all the different function signatures.
+
+Working out this pattern in rust was very amusing, and it is pretty amazing how the rust compiler can compile an eccentric pattern like this. Alos kudos to whoever implemented this in the actix-web library. You, sir are a genius.
