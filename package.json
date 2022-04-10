@@ -14,7 +14,7 @@
     "serve": "gatsby serve",
     "clean": "gatsby clean",
     "typecheck": "tsc --noEmit",
-    "deploy": "gh-pages -d public -b master -r https://${GITHUB_NOELZUBIN_TOKEN}@github.com/noelzubin/noelzubin.github.io.git"
+    "deploy": "gh-pages -d public -b master"
   },
   "dependencies": {
     "@mdx-js/mdx": "^1.6.22",
