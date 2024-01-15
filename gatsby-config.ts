@@ -16,7 +16,6 @@ const config: GatsbyConfig = {
         },
       },
     },
-    "gatsby-plugin-image",
     "gatsby-plugin-react-helmet",
     "gatsby-plugin-sitemap",
     {
@@ -26,9 +25,36 @@ const config: GatsbyConfig = {
       },
     },
     {
+      resolve: "gatsby-source-filesystem",
+      options: {
+        name: "blog",
+        path: "./src/blog/",
+      },
+      __key: "blog",
+    },
+    {
       resolve: "gatsby-plugin-mdx",
       options: {
-        gatsbyRemarkPlugins: [{ resolve: "gatsby-remark-prismjs" }],
+        gatsbyRemarkPlugins: [
+          { resolve: "gatsby-remark-prismjs" },
+          {
+            resolve: "gatsby-remark-images",
+            options: {
+              maxWidth: 1200,
+            },
+          },
+        ],
+      },
+    },
+    "gatsby-plugin-image",
+    {
+      resolve: `gatsby-plugin-sharp`,
+      options: {
+        defaults: {
+          quality: 70,
+          formats: ['auto', 'webp', 'avif'],
+          placeholder: 'blurred',
+        },
       },
     },
     "gatsby-transformer-sharp",
@@ -48,14 +74,7 @@ const config: GatsbyConfig = {
       },
       __key: "pages",
     },
-    {
-      resolve: "gatsby-source-filesystem",
-      options: {
-        name: "blog",
-        path: "./src/blog/",
-      },
-      __key: "blog",
-    },
+
     {
       resolve: `gatsby-plugin-google-fonts`,
       options: {
